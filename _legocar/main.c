@@ -7,9 +7,12 @@
 #include <unistd.h>
 #include <termios.h>
 #include <time.h>
+#include <wiringPi.h>
 
+/*
 #define TRUE	1
 #define FALSE	0
+*/
 
 #define CONTROL_PLUS_MAC	"90:84:2B:4C:84:8A"					// Control+ hub의 mac 주소
 #define CONTROL_PLUS_UUID	"00001624-1212-efde-1623-785feabcd123"	// hub에서 지원하는 서비스 UUID
@@ -44,7 +47,7 @@ gatt_connection_t* connection = NULL;
 //void* adapter;
 int connected = FALSE;
 int read_req = FALSE;
-
+int speed = 0;
 char write_buf[5000];
 
 struct timespec rqtp, rmtp;
@@ -54,6 +57,12 @@ static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
 static void recv_data();
 void send_error(uuid_t g_uuid);
 int send_basic_motor_speed(int port, int speed);
+
+void finish()
+{
+	gattlib_disconnect(connection);
+	exit(1);
+}
 
 int getch()
 {
@@ -91,6 +100,7 @@ void send_error(uuid_t g_uuid)
 }
 
 
+// function to order same command
 void move_speed(int speed)
 {
 	send_basic_motor_speed(0, speed);
@@ -115,6 +125,7 @@ void rotate(direction_t d)
 	send_basic_motor_speed(2, 0);
 }
 
+
 // 모터의 스피드 결정 -100 ~ 100 사이의 값
 // port : 포트번호 앞바퀴 0, 뒷바퀴 1, 회전 2
 // port 0 and port 1 have to get same command --> move_speed(speed);
@@ -135,13 +146,13 @@ int send_basic_motor_speed(int port, int speed)
 	write_buf[0] = len;			// length
 	write_buf[1] = 0x00;
 	write_buf[2] = 0x81;		// port input format setup (single)
-	write_buf[3] = port;		// port no.
+	write_buf[3] = port;		// port no. (motor no)
 	write_buf[4] = 0x11;		// execute immediately & command feedback (status)
 	write_buf[5] = 0x51;
 	write_buf[6] = 0x00;
-	write_buf[7] = speed; 
+	write_buf[7] = speed; 		// speed of motor (max speed is 100)
 
-
+	
 	// send write_buf to g_uuid
 	// which motor, which speed
 	ret = gattlib_write_char_by_uuid(connection, &g_uuid, write_buf, len);
@@ -275,16 +286,34 @@ static void _recv_data() {
 	return;
 }
 
+void slowStart_driving() {
+	while(1) {
+		speed += 5;
+		if(speed > 30) {
+			speed = 30; 
+			move_speed(speed);
+			break;
+		}
+		move_speed(speed);
+		rqtp.tv_nsec = 500000000;
+		nanosleep(&rqtp, &rmtp);
+	}
+
+}
 int main(int argc, char *argv[])
 {
-	int c, speed = 0;
+	int c;
 	int ret;
 //	const char* adapter_name;
 	pthread_t thread;
 	int retry_count = 5;
-	clock_t start, end;
-	float curr_time; 
-	int timeLimit = 5 * 30;
+//	clock_t start, end;
+//	int timeLimit = 5 * 30; // 5 minutes
+//	float curr_time; 
+	int trig = 23 ;
+	int echo = 24 ;
+	int start_time, end_time ;
+	float distance ;
 
 	// rqtp, rmtp 설정. 방향전환을 위해 필요함
 	rqtp.tv_sec = 0;
@@ -294,8 +323,7 @@ int main(int argc, char *argv[])
 
 	// 데이터를 받기위해 필요함. 시그널 발생시에 데이터 받음
 	signal(SIGUSR1, _recv_data);
-
-	adapter_name = malloc(10000);
+	signal(SIGINT, finish);
 
 
 //	// 블루투스 동작
@@ -311,8 +339,8 @@ int main(int argc, char *argv[])
 	if (gattlib_string_to_uuid(CONTROL_PLUS_UUID, strlen(CONTROL_PLUS_UUID) + 1, &g_uuid) < 0) {
 		fprintf(stderr, "Error: Cannot translate UUID (%s)\n", CONTROL_PLUS_UUID);
 		return 1;
-	}   
-
+	}
+	
 	// 블루투스 접속
 	// gattlib_connect() --> connect
 	// failed sometimes
@@ -322,6 +350,7 @@ int main(int argc, char *argv[])
 		if (connection == NULL) {
 			fprintf(stderr, "Fail to connect to the bluetooth device.\n");
 			retry_count--;
+			// Max 10 loop
 			sleep(1);
 			continue;
 		}
@@ -334,6 +363,74 @@ int main(int argc, char *argv[])
 	}
 
 	printf("Connected\n");
+	
+	
+	///////////////////////////////////////////////////////////////
+	
+	printf("hello");
+//	start = clock();
+//	curr_time = start / CLOCKS_PER_SEC;
+//
+	
+	if (wiringPiSetup() == -1) exit(1) ;
+
+	pinMode(trig, OUTPUT) ;
+	pinMode(echo , INPUT) ;
+
+	slowStart_driving();
+	
+	while(1) {
+		digitalWrite(trig, LOW) ;
+		delay(500) ;
+		digitalWrite(trig, HIGH) ;
+		delayMicroseconds(10) ;
+		digitalWrite(trig, LOW) ;
+
+		while (digitalRead(echo) == 0) ;
+
+		start_time = micros() ;
+
+		while (digitalRead(echo) == 1) ;
+
+		end_time = micros() ;
+		distance = (end_time - start_time) / 29. / 2. ;
+
+		printf("distance %.2f cm\n", distance) ;
+		
+		if (distance < 5) {
+			speed = 0;
+			move_speed(speed);
+		}
+		else{
+			slowStart_driving();
+		}
+		
+	}
+		
+	
+//	while(1) {
+//		speed += 5;
+//		if(speed > 30) speed = 30;
+//		move_speed(speed);
+//		rqtp.tv_nsec = 500000000;
+//		nanosleep(&rqtp, &rmtp);
+//	}
+//		if (getch() == 'q') {
+//			speed = 0;
+//			move_speed(speed);
+//			break;
+//		}		
+	
+	
+//	while(curr_time < timeLimit){
+//		speed += 10;
+//		move_speed(speed);
+//		end = clock();
+//		curr_time = (float)(end - start)/CLOCKS_PER_SEC;
+//	}
+	
+	
+	
 	///////////////////////////////////////////////////////////////
 	while(1) {
 		c = getch();
@@ -373,6 +470,7 @@ int main(int argc, char *argv[])
 //	move_speed(50);
 //	sleep(1);
 //	move_speed(0);
+	
 	
 
 	///////////////////////////////////////////////////////////////
